@@ -1,4 +1,5 @@
 """API + servidor do frontend. Roda em 0.0.0.0 para ficar acessível na rede interna."""
+import os
 import re
 import socket
 import threading
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")  # usa o .env interno do projeto
 
-from rag import DEFAULT_CHUNK, DEFAULT_OVERLAP, DEFAULT_TOP_K, RagIndex  # noqa: E402
+from rag import DEFAULT_CHUNK, DEFAULT_OVERLAP, DEFAULT_TOP_K, CLAUDE_MODELS, GEMINI_MODELS, RagIndex  # noqa: E402
 
 KB_DIR = ROOT / "base de conhecimento"
 UPLOAD_DIR = ROOT / "uploads"
@@ -85,18 +86,31 @@ class SearchReq(BaseModel):
     question: str = Field(min_length=1, max_length=1500)
     top_k: int = Field(DEFAULT_TOP_K, ge=1, le=10)
     doc_ids: list[str] | None = Field(None, max_length=100)
+    model: str | None = Field(None, max_length=50)  # None/openai = fixo; gemini-* = escolha do usuário
 
 
 class AnswerReq(BaseModel):
     question: str = Field(min_length=1, max_length=1500)
     chunk_ids: list[str] = Field(max_length=10)
     scores: list[float] = Field(max_length=10)
+    model: str | None = Field(None, max_length=50)
+
+
+@app.get("/api/models")
+def models():
+    """Lista só os provedores cuja chave está no .env (OpenAI sempre; é a base dos embeddings)."""
+    out = [{"id": "openai", "label": "OpenAI (GPT-4o mini)"}]
+    if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+        out += [{"id": k, "label": k.replace("gemini-", "Gemini ")} for k in GEMINI_MODELS]
+    if os.getenv("CLAUDE_API_KEY"):
+        out += [{"id": k, "label": k.replace("claude-", "Claude ")} for k in CLAUDE_MODELS]
+    return out
 
 
 @app.post("/api/search")
 def search(req: SearchReq):
     try:
-        hits = index.search(req.question.strip(), req.top_k, req.doc_ids)
+        hits = index.search(req.question.strip(), req.top_k, req.doc_ids, req.model)
     except Exception:
         raise HTTPException(502, "Falha ao buscar trechos. Tente novamente.")
     return [{"chunkId": c.id, "score": s} for c, s in hits]
@@ -106,7 +120,7 @@ def search(req: SearchReq):
 def answer(req: AnswerReq):
     hits = [(index.chunk_by_id[i], s) for i, s in zip(req.chunk_ids, req.scores) if i in index.chunk_by_id]
     try:
-        return index.answer(req.question.strip(), hits)
+        return index.answer(req.question.strip(), hits, req.model)
     except Exception:
         raise HTTPException(502, "Falha ao gerar a resposta. Tente novamente.")
 

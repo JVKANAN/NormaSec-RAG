@@ -1,6 +1,7 @@
 import { ArrowUp, Check, ChevronDown, FileText } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { displayName } from '../lib/docs'
+import { fetchModels, getModel, setModel, type ModelOption } from '../services/assistant'
 import type { DocumentItem } from '../types'
 
 type Props = {
@@ -17,6 +18,9 @@ export function Composer({ docs, busy, placeholder, onSend, large }: Props) {
   const [menu, setMenu] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
   const box = useRef<HTMLDivElement>(null)
+  const [models, setModels] = useState<ModelOption[]>([])
+  const [model, setModelState] = useState(getModel())
+  useEffect(() => { fetchModels().then(setModels).catch(() => {}) }, [])
 
   const ready = docs.filter(d => d.status === 'pronto')
   const valid = scope.filter(id => ready.some(d => d.id === id))
@@ -79,10 +83,16 @@ export function Composer({ docs, busy, placeholder, onSend, large }: Props) {
               </div>
             )}
           </div>
+          <div className="flex items-center gap-2">
+            <select value={model} aria-label="Modelo de IA" onChange={e => { setModel(e.target.value); setModelState(e.target.value) }}
+              className="max-w-[170px] rounded-lg border border-surface-line bg-white px-2 py-2 text-sm text-ink-soft">
+              {models.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
           <button onClick={send} disabled={!!reason} title={reason || 'Enviar pergunta'}
             className="flex shrink-0 items-center gap-2 rounded-xl bg-brand px-5 py-3 text-[15px] font-medium text-white transition-colors hover:bg-brand-dark disabled:cursor-not-allowed disabled:bg-[#b7c8c9]">
             <ArrowUp className="h-4 w-4" aria-hidden /> Enviar pergunta
           </button>
+          </div>
         </div>
       </div>
       <p className="mt-3 text-center text-xs text-ink-soft">Confira sempre as fontes. Não inclua dados pessoais ou informações confidenciais na pergunta.</p>

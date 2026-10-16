@@ -12,7 +12,22 @@ import pymupdf
 from openai import OpenAI
 
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")  # OpenAI: modelo fixo
+# Gemini (via endpoint compatível com OpenAI). id exposto na UI -> nome real do modelo.
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+GEMINI_MODELS = {
+    "gemini-3.1-pro": "gemini-3.1-pro-preview",
+    "gemini-2.5-pro": "gemini-2.5-pro",
+    "gemini-2.5-flash": "gemini-2.5-flash",
+    "gemini-2.5-flash-lite": "gemini-2.5-flash-lite",
+}
+# Claude (Anthropic), também via endpoint compatível com OpenAI. Requer CLAUDE_API_KEY no .env.
+CLAUDE_BASE_URL = "https://api.anthropic.com/v1/"
+CLAUDE_MODELS = {
+    "claude-sonnet-4-5": "claude-sonnet-4-5",
+    "claude-opus-4-1": "claude-opus-4-1",
+    "claude-haiku-4-5": "claude-haiku-4-5",
+}
 # Abaixo disso o melhor trecho é considerado irrelevante (calibrado p/ text-embedding-3-small).
 MIN_SCORE = float(os.getenv("MIN_SCORE", "0.30"))
 
@@ -119,6 +134,26 @@ class RagIndex:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(exist_ok=True)
         self.lock = threading.RLock()
+        self._gemini: OpenAI | None = None
+        self._claude: OpenAI | None = None
+
+    def _chat_target(self, model: str | None) -> tuple[OpenAI, str]:
+        """OpenAI (padrão, modelo fixo) ou Gemini. Embeddings sempre usam a OpenAI."""
+        if model and model in GEMINI_MODELS:
+            key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            if not key:
+                raise RuntimeError("GEMINI_API_KEY não configurada no .env")
+            if self._gemini is None:
+                self._gemini = OpenAI(api_key=key, base_url=GEMINI_BASE_URL)
+            return self._gemini, GEMINI_MODELS[model]
+        if model and model in CLAUDE_MODELS:
+            key = os.getenv("CLAUDE_API_KEY")
+            if not key:
+                raise RuntimeError("CLAUDE_API_KEY não configurada no .env")
+            if self._claude is None:
+                self._claude = OpenAI(api_key=key, base_url=CLAUDE_BASE_URL)
+            return self._claude, CLAUDE_MODELS[model]
+        return self.client, CHAT_MODEL
 
     # ---------- indexação ----------
     def _embed(self, texts: list[str]) -> np.ndarray:
@@ -172,23 +207,24 @@ class RagIndex:
             return True
 
     # ---------- busca ----------
-    def _expand(self, question: str) -> list[str]:
+    def _expand(self, question: str, model: str | None = None) -> list[str]:
         """Reformula a pergunta coloquial com a terminologia das normas (só para a BUSCA)."""
         try:
-            resp = self.client.chat.completions.create(
-                model=CHAT_MODEL, temperature=0, response_format={"type": "json_object"},
+            client, name = self._chat_target(model)
+            resp = client.chat.completions.create(
+                model=name, temperature=0, response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": EXPAND_PROMPT},
                     {"role": "user", "content": question},
                 ],
             )
-            qs = json.loads(resp.choices[0].message.content).get("queries", [])
+            qs = _loads(resp.choices[0].message.content).get("queries", [])
             return [str(q)[:300] for q in qs if isinstance(q, str) and q.strip()][:3]
         except Exception:  # noqa: BLE001 - sem expansão a busca segue só com a pergunta original
             return []
 
     def search(self, question: str, top_k: int = DEFAULT_TOP_K,
-               doc_ids: list[str] | None = None) -> list[tuple[Chunk, float]]:
+               doc_ids: list[str] | None = None, model: str | None = None) -> list[tuple[Chunk, float]]:
         with self.lock:
             ready = [d for d in self.docs.values() if d.status == "pronto" and d.embeddings is not None
                      and (not doc_ids or d.id in doc_ids)]
@@ -196,7 +232,7 @@ class RagIndex:
                 return []
             chunks = [c for d in ready for c in d.chunks]
             matrix = np.vstack([d.embeddings for d in ready])
-        queries = [question, *self._expand(question)]
+        queries = [question, *self._expand(question, model)]
         # Pontuação de cada trecho = melhor similaridade entre a pergunta e suas reformulações.
         sims = (matrix @ self._embed(queries).T).max(axis=1)
         # Se a pergunta cita um documento pelo nome (ex.: "LGPD", "27001"), favorece seus trechos.
@@ -219,14 +255,15 @@ class RagIndex:
         return [(chunks[i], float(sims[i])) for i in picked]
 
     # ---------- geração ----------
-    def answer(self, question: str, hits: list[tuple[Chunk, float]]) -> dict:
+    def answer(self, question: str, hits: list[tuple[Chunk, float]], model: str | None = None) -> dict:
         if not hits or hits[0][1] < MIN_SCORE:
             return _insufficient()
         context = "\n\n".join(
             f"[{n}] ({c.doc_name}, p. {c.page})\n{c.text}" for n, (c, _) in enumerate(hits, 1)
         )
-        resp = self.client.chat.completions.create(
-            model=CHAT_MODEL,
+        client, name = self._chat_target(model)
+        resp = client.chat.completions.create(
+            model=name,
             temperature=0,
             response_format={"type": "json_object"},
             messages=[
@@ -235,7 +272,7 @@ class RagIndex:
             ],
         )
         try:
-            data = json.loads(resp.choices[0].message.content)
+            data = _loads(resp.choices[0].message.content)
             text = str(data.get("answer", "")).strip()
             insufficient = bool(data.get("insufficient", False))
         except (json.JSONDecodeError, TypeError):
@@ -261,6 +298,17 @@ class RagIndex:
                 "score": round(score, 2), "text": c.text,
             })
         return {"answer": text, "sources": sources, "insufficientContext": False}
+
+
+def _loads(raw: str | None) -> dict:
+    """Parse de JSON tolerante: alguns modelos (Claude) ignoram response_format e envolvem em ` ."""
+    s = (raw or "").strip()
+    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s)
+    if not s.startswith("{"):
+        a, b = s.find("{"), s.rfind("}")
+        if a != -1 and b > a:
+            s = s[a:b + 1]
+    return json.loads(s)
 
 
 _GENERIC = {"nbr", "iso", "nbriso", "iec", "texto", "base", "top", "ten", "pdf", "docs"}

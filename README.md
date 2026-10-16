@@ -61,6 +61,9 @@ Conteúdo do `.env`:
 
 ```env
 OPENAI_API_KEY=sua-chave-aqui
+# Opcionais: habilitam modelos extras no seletor da interface
+# GEMINI_API_KEY=sua-chave-gemini
+# CLAUDE_API_KEY=sua-chave-claude
 
 # Opcionais (valores padrão)
 # EMBED_MODEL=text-embedding-3-small

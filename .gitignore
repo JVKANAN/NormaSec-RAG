@@ -1,0 +1,19 @@
+# Ambientes locais e segredos
+.env
+.env.*
+!.env.example
+.venv/
+env/
+venv/
+.cache/
+__pycache__/
+*.pyc
+
+# Frontend
+frontend/node_modules/
+*.tsbuildinfo
+
+# Uploads temporários e normas pagas
+uploads/*
+!uploads/.gitkeep
+base de conhecimento/NBR*
